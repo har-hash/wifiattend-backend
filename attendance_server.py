@@ -3,10 +3,11 @@ import re
 import sqlite3
 from flask import Flask, jsonify, request
 from datetime import datetime
+import cv2
 import numpy as np
-import face_recognition
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
+from PIL import Image
 
 app = Flask(__name__)
 DB_PATH = 'attendance.db'
@@ -127,33 +128,18 @@ def verify_face():
     file = request.files.get('face_image')
     if not file:
         return jsonify({'success': False, 'error': 'No face image provided'}), 400
-    filename = secure_filename(file.filename)
-    filepath = f'tmp_{filename}'
-    file.save(filepath)
-    image = face_recognition.load_image_file(filepath)
-    encodings = face_recognition.face_encodings(image)
-    if not encodings:
-        os.remove(filepath)
-        return jsonify({'success': False, 'error': 'No face found in image'}), 400
-    embedding = encodings[0]
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT id, name, email, mac_address, face_embedding FROM users WHERE face_embedding IS NOT NULL')
-    users = c.fetchall()
-    min_dist = float('inf')
-    matched_user = None
-    for user_id, name, email, mac, emb_bytes in users:
-        db_emb = np.frombuffer(emb_bytes, dtype=np.float64)
-        dist = np.linalg.norm(embedding - db_emb)
-        if dist < 0.6 and dist < min_dist:  # 0.6 is a typical threshold
-            min_dist = dist
-            matched_user = {'id': user_id, 'name': name, 'email': email, 'mac_address': mac}
-    conn.close()
-    os.remove(filepath)
-    if matched_user:
-        return jsonify({'success': True, 'user': matched_user})
+    # Read image as numpy array
+    img = Image.open(file.stream).convert('RGB')
+    img_np = np.array(img)
+    # Convert to grayscale
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    # Load OpenCV's built-in Haar cascade for face detection
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
+    if len(faces) == 0:
+        return jsonify({'success': False, 'error': 'No face detected'}), 400
     else:
-        return jsonify({'success': False, 'error': 'No match found'}), 404
+        return jsonify({'success': True, 'faces_detected': int(len(faces))})
 
 # --- API: Get User ID by Email ---
 @app.route('/get_user_id', methods=['GET'])
