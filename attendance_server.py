@@ -74,35 +74,37 @@ def register():
 # --- API: Register Face ---
 @app.route('/register_face', methods=['POST'])
 def register_face():
+    import requests
+    FACEPP_API_KEY = os.environ.get("FACEPP_API_KEY")
+    FACEPP_API_SECRET = os.environ.get("FACEPP_API_SECRET")
+    FACE_DETECT_URL = "https://api-us.faceplusplus.com/facepp/v3/detect"
     name = request.form.get('name')
     mac = request.form.get('mac_address', '').lower()
     file = request.files.get('face_image')
     if not (name and file):
         return jsonify({'success': False, 'error': 'Missing name or face image'}), 400
-    # Save file temporarily
-    filename = secure_filename(file.filename)
-    filepath = f'tmp_{filename}'
-    file.save(filepath)
-    # Extract face embedding
-    image = face_recognition.load_image_file(filepath)
-    encodings = face_recognition.face_encodings(image)
-    if not encodings:
-        os.remove(filepath)
-        return jsonify({'success': False, 'error': 'No face found in image'}), 400
-    embedding = encodings[0]
-    embedding_bytes = embedding.tobytes()
+    img_data = file.read()
+    data = {
+        'api_key': FACEPP_API_KEY,
+        'api_secret': FACEPP_API_SECRET
+    }
+    files = {'image_file': ('face.jpg', img_data)}
+    response = requests.post(FACE_DETECT_URL, data=data, files=files)
+    result = response.json()
+    if not result.get('faces'):
+        return jsonify({'success': False, 'error': 'No face detected'}), 400
+    face_token = result['faces'][0]['face_token']
+    # Store face_token in DB for this user
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     try:
-        # Insert or update user with embedding
-        c.execute('''INSERT INTO users (name, mac_address, face_embedding) VALUES (?, ?, ?)
-                     ON CONFLICT(mac_address) DO UPDATE SET face_embedding=excluded.face_embedding, name=excluded.name''',
-                  (name, mac, embedding_bytes))
+        c.execute('''INSERT INTO users (name, mac_address, face_token) VALUES (?, ?, ?)
+                     ON CONFLICT(mac_address) DO UPDATE SET name=excluded.name, face_token=excluded.face_token''',
+                  (name, mac, face_token))
         conn.commit()
-        return jsonify({'success': True}), 201
+        return jsonify({'success': True, 'face_token': face_token}), 201
     finally:
         conn.close()
-        os.remove(filepath)
 
 # --- API: Login User ---
 @app.route('/login', methods=['POST'])
@@ -125,21 +127,46 @@ def login():
 # --- API: Verify Face ---
 @app.route('/verify_face', methods=['POST'])
 def verify_face():
+    import requests
+    FACEPP_API_KEY = os.environ.get("FACEPP_API_KEY")
+    FACEPP_API_SECRET = os.environ.get("FACEPP_API_SECRET")
+    FACE_DETECT_URL = "https://api-us.faceplusplus.com/facepp/v3/detect"
+    FACE_COMPARE_URL = "https://api-us.faceplusplus.com/facepp/v3/compare"
+    mac = request.form.get('mac_address', '').lower()
     file = request.files.get('face_image')
-    if not file:
-        return jsonify({'success': False, 'error': 'No face image provided'}), 400
-    # Read image as numpy array
-    img = Image.open(file.stream).convert('RGB')
-    img_np = np.array(img)
-    # Convert to grayscale
-    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-    # Load OpenCV's built-in Haar cascade for face detection
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-    if len(faces) == 0:
-        return jsonify({'success': False, 'error': 'No face detected'}), 400
-    else:
-        return jsonify({'success': True, 'faces_detected': int(len(faces))})
+    if not (mac and file):
+        return jsonify({'success': False, 'error': 'Missing mac_address or face image'}), 400
+    # Fetch face_token for this user
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT face_token FROM users WHERE mac_address=?', (mac,))
+    row = c.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return jsonify({'success': False, 'error': 'No registered face for this user'}), 404
+    face_token1 = row[0]
+    img_data = file.read()
+    # Detect face in uploaded image
+    data = {
+        'api_key': FACEPP_API_KEY,
+        'api_secret': FACEPP_API_SECRET
+    }
+    files = {'image_file2': ('face.jpg', img_data)}
+    response = requests.post(FACE_DETECT_URL, data=data, files={'image_file': ('face.jpg', img_data)})
+    result = response.json()
+    if not result.get('faces'):
+        return jsonify({'success': False, 'error': 'No face detected in uploaded image'}), 400
+    face_token2 = result['faces'][0]['face_token']
+    # Compare faces
+    compare_data = {
+        'api_key': FACEPP_API_KEY,
+        'api_secret': FACEPP_API_SECRET,
+        'face_token1': face_token1,
+        'face_token2': face_token2
+    }
+    compare_response = requests.post(FACE_COMPARE_URL, data=compare_data)
+    compare_result = compare_response.json()
+    return jsonify(compare_result)
 
 # --- API: Get User ID by Email ---
 @app.route('/get_user_id', methods=['GET'])
